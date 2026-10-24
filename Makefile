@@ -264,6 +264,16 @@ check-imsm: test_imsm
 raid6check : raid6check.o mdadm.h $(CHECK_OBJS)
 	$(CC) $(CXFLAGS) $(LDFLAGS) -o raid6check raid6check.o $(CHECK_OBJS)
 
+test_imsm_write_errors: tests/imsm-write-errors.c super-intel.c $(INCL) mdmon.h xmalloc.o
+	$(CC) $(CFLAGS) $(CPPFLAGS) -ffunction-sections -fdata-sections \
+		$(LDFLAGS) -Wl,--gc-sections -Wl,--wrap=write,--wrap=lseek64 \
+		-Wl,--wrap=get_dev_size,--wrap=get_dev_sector_size \
+		-o $@ tests/imsm-write-errors.c xmalloc.o
+
+.PHONY: check-imsm-write-errors
+check-imsm-write-errors: test_imsm_write_errors
+	./test_imsm_write_errors
+
 mdadm.8 : mdadm.8.in
 	sed -e 's/{DEFAULT_METADATA}/$(DEFAULT_METADATA)/g' \
 	-e 's,{MAP_PATH},$(MAP_PATH),g' -e 's,{CONFFILE},$(CONFFILE),g' \
@@ -350,6 +360,7 @@ test: mdadm mdmon test_stripe swap_super raid6check
 	@echo "Please run './test' as root"
 
 clean :
+	rm -f test_imsm_write_errors
 	rm -f mdadm mdmon $(OBJS) $(MON_OBJS) $(STATICOBJS) core *.man \
 	mdadm.static *.orig *.porig *.rej *.alt merge_file_* \
 	mdadm.Os mdadm.O2 mdmon.O2 swap_super init.cpio.gz \

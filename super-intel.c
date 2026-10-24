@@ -6283,19 +6283,20 @@ static int write_super_imsm_spare(struct intel_super *super, struct dl *d)
 static int write_super_imsm_spares(struct intel_super *super, int doclose)
 {
 	struct dl *d;
+	int rv = 0;
 
 	for (d = super->disks; d; d = d->next) {
 		if (d->index != -1)
 			continue;
 
 		if (write_super_imsm_spare(super, d))
-			return 1;
+			rv = 1;
 
 		if (doclose)
 			close_fd(&d->fd);
 	}
 
-	return 0;
+	return rv;
 }
 
 static int write_super_imsm(struct supertype *st, int doclose)
@@ -6312,6 +6313,7 @@ static int write_super_imsm(struct supertype *st, int doclose)
 	int num_disks = 0;
 	int clear_migration_record = 1;
 	__u32 bbm_log_size;
+	int rv = 0;
 
 	/* 'generation' is incremented everytime the metadata is written */
 	generation = __le32_to_cpu(mpb->generation_num);
@@ -6370,10 +6372,8 @@ static int write_super_imsm(struct supertype *st, int doclose)
 	sum = __gen_imsm_checksum(mpb);
 	mpb->check_sum = __cpu_to_le32(sum);
 
-	if (super->clean_migration_record_by_mdmon) {
+	if (super->clean_migration_record_by_mdmon)
 		clear_migration_record = 1;
-		super->clean_migration_record_by_mdmon = 0;
-	}
 	if (clear_migration_record)
 		memset(super->migr_rec_buf, 0,
 		    MIGR_REC_BUF_SECTORS*MAX_SECTOR_SIZE);
@@ -6389,31 +6389,36 @@ static int write_super_imsm(struct supertype *st, int doclose)
 		if (clear_migration_record) {
 			unsigned long long dsize;
 
-			get_dev_size(d->fd, NULL, &dsize);
-			if (lseek(d->fd, dsize - sector_size,
-			    SEEK_SET) >= 0) {
-				if ((unsigned int)write(d->fd,
-				    super->migr_rec_buf,
-				    MIGR_REC_BUF_SECTORS*sector_size) !=
-				    MIGR_REC_BUF_SECTORS*sector_size)
-					perror("Write migr_rec failed");
+			if (!get_dev_size(d->fd, NULL, &dsize) ||
+			    lseek(d->fd, dsize - sector_size, SEEK_SET) < 0 ||
+			    (unsigned int)write(d->fd, super->migr_rec_buf,
+					MIGR_REC_BUF_SECTORS * sector_size) !=
+					MIGR_REC_BUF_SECTORS * sector_size) {
+				pr_err("failed to clear migration record for device %d:%d\n",
+				       d->major, d->minor);
+				rv = 1;
 			}
 		}
 
-		if (store_imsm_mpb(d->fd, mpb))
+		if (store_imsm_mpb(d->fd, mpb)) {
 			fprintf(stderr,
 				"failed for device %d:%d (fd: %d)%s\n",
 				d->major, d->minor,
 				d->fd, strerror(errno));
+			rv = 1;
+		}
 
 		if (doclose)
 			close_fd(&d->fd);
 	}
 
 	if (spares)
-		return write_super_imsm_spares(super, doclose);
+		rv |= write_super_imsm_spares(super, doclose);
 
-	return 0;
+	/* Keep the explicit clear request until every required write succeeds. */
+	if (!rv)
+		super->clean_migration_record_by_mdmon = 0;
+	return rv;
 }
 
 static int create_array(struct supertype *st, int dev_idx)
@@ -9085,7 +9090,8 @@ static int store_imsm_mpb(int fd, struct imsm_super *mpb)
 
 	if (!get_dev_sector_size(fd, NULL, &sector_size))
 		return 1;
-	get_dev_size(fd, NULL, &dsize);
+	if (!get_dev_size(fd, NULL, &dsize))
+		return 1;
 
 	if (mpb_size > sector_size) {
 		/* -1 to account for anchor */
@@ -9119,9 +9125,11 @@ static void imsm_sync_metadata(struct supertype *container)
 	if (!super->updates_pending)
 		return;
 
-	write_super_imsm(container, 0);
-
-	super->updates_pending = 0;
+	if (write_super_imsm(container, 0) == 0)
+		super->updates_pending = 0;
+	else
+		/* Retry even if no further kernel state change wakes mdmon. */
+		container->retry_soon = 1;
 }
 
 static struct dl *imsm_readd(struct intel_super *super, int idx, struct active_array *a)

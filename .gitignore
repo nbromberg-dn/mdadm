@@ -18,3 +18,4 @@
 /mdassemble.static
 /mdmon.O2
 /raid6check
+/test_imsm_write_errors
