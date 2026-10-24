@@ -251,6 +251,16 @@ msg.o: msg.c msg.h
 test_stripe : restripe.c xmalloc.o mdadm.h
 	$(CC) $(CFLAGS) $(CXFLAGS) $(LDFLAGS) -o test_stripe xmalloc.o  -DMAIN restripe.c
 
+# Include the IMSM implementation to exercise its private callbacks. Discard
+# unrelated sections so the test needs neither running arrays nor mdmon.
+test_imsm: tests/imsm-recovery.c super-intel.c $(INCL) mdmon.h xmalloc.o
+	$(CC) $(CFLAGS) $(CPPFLAGS) -ffunction-sections -fdata-sections \
+		$(LDFLAGS) -Wl,--gc-sections -o $@ tests/imsm-recovery.c xmalloc.o
+
+.PHONY: check-imsm
+check-imsm: test_imsm
+	./test_imsm
+
 raid6check : raid6check.o mdadm.h $(CHECK_OBJS)
 	$(CC) $(CXFLAGS) $(LDFLAGS) -o raid6check raid6check.o $(CHECK_OBJS)
 
@@ -343,7 +353,7 @@ clean :
 	rm -f mdadm mdmon $(OBJS) $(MON_OBJS) $(STATICOBJS) core *.man \
 	mdadm.static *.orig *.porig *.rej *.alt merge_file_* \
 	mdadm.Os mdadm.O2 mdmon.O2 swap_super init.cpio.gz \
-	test_stripe raid6check raid6check.o mdmon mdadm.8
+	test_stripe test_imsm raid6check raid6check.o mdmon mdadm.8
 	rm -rf cov-int
 
 dist : clean

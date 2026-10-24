@@ -1,0 +1,82 @@
+# A returning member must become in-sync in persistent IMSM metadata too.
+# Unlike the pristine-spare test, retain the removed disk's old metadata.
+. tests/env-imsm-template
+
+wait_healthy() {
+	local i
+
+	for ((i = 0; i < 120; i++)); do
+		if [ "$(cat "$mdsys/degraded")" = 0 ] &&
+		   [ "$(cat "$mdsys/sync_action")" = idle ] &&
+		   grep -qw in_sync "$mdsys/rd0/state" &&
+		   grep -qw in_sync "$mdsys/rd1/state"; then
+			return
+		fi
+		sleep 1
+	done
+	die "IMSM RAID1 did not become healthy"
+}
+
+check_metadata() {
+	local disk text i
+
+	# MD completion and mdmon's metadata write are asynchronous. Allow a
+	# bounded settling interval, but inspect before stopping the array.
+	for disk in "$dev0" "$dev1"; do
+		for ((i = 0; i < 50; i++)); do
+			text=$(mdadm --examine "$disk")
+			if grep -Eq 'Slots : \[UU\]$' <<< "$text" &&
+			   grep -Eq 'Failed disk : none$' <<< "$text" &&
+			   grep -Eq 'Migrate State : idle$' <<< "$text" &&
+			   grep -Eq 'Map State : normal$' <<< "$text" &&
+			   ! grep -q 'out-of-sync' <<< "$text"; then
+				break
+			fi
+			sleep 0.1
+		done
+		if [ "$i" = 50 ]; then
+			echo "$text"
+			die "$disk: runtime is healthy but IMSM metadata is not"
+		fi
+	done
+}
+
+mdadm -CR "$container" -e imsm -n 2 "$dev0" "$dev1"
+mdadm -CR "$member0" -l 1 -n 2 -z 8192 "$container"
+mdsys=/sys/block/$(basename "$(readlink -f "$member0")")/md
+wait_healthy
+check_metadata
+
+payload=$(mktemp "$targetdir/imsm-returned-XXXXXX")
+trap 'rm -f "$payload"' EXIT
+
+# Repeat with the opposite member, only after verifying the first rebuild.
+for returned in "$dev0" "$dev1"; do
+	mdadm --fail "$member0" "$returned"
+	for ((attempt = 0; attempt < 30; attempt++)); do
+		if mdadm --remove "$container" "$returned"; then
+			break
+		fi
+		sleep 1
+	done
+	[ "$attempt" -lt 30 ] || die "Failed member was not removed"
+
+	# Degraded writes ensure that simply reaccepting stale data is wrong.
+	dd if=/dev/urandom of="$payload" bs=1M count=1
+	dd if="$payload" of="$member0" bs=1M conv=fsync
+	mdadm --add "$container" "$returned"
+	wait_healthy
+	check_metadata
+	cmp -n 1048576 "$payload" "$member0"
+
+	# Verify the rebuilt data on each member, using the kernel's offset.
+	for slot in 0 1; do
+		rd="$mdsys/rd$slot"
+		disk=/dev/$(basename "$(readlink -f "$rd/block")")
+		offset=$(cat "$rd/offset")
+		dd if="$disk" bs=512 skip="$offset" count=2048 | cmp "$payload" -
+	done
+done
+
+mdadm -Ss
+check_metadata

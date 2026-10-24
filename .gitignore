@@ -9,6 +9,7 @@
 /mdmon
 /swap_super
 /test_stripe
+/test_imsm
 /TAGS
 /mdadm.O2
 /mdadm.Os
